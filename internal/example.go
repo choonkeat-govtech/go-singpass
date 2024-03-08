@@ -31,7 +31,7 @@ func CompileCheck() error {
 		&provider,
 		secretKeySet,
 		cfg,
-		singpass.StateFromCookie,
+		singpass.NonceStateFromCookie,
 		handleError,
 		handleSuccess,
 	)

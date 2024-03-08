@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -17,56 +18,63 @@ import (
 )
 
 var (
-	ErrNoEncKeyFound        = fmt.Errorf("no enc key found")
-	ErrNoSigKeyFound        = fmt.Errorf("no sig key found")
-	ErrUnsupportedAlgorithm = fmt.Errorf("invalid alg")
-	ErrStateMismatch        = fmt.Errorf("state mismatch")
-	ErrMissingCode          = fmt.Errorf("missing code")
-	ErrCreateClaims         = fmt.Errorf("jwt.NewWithClaims")
-	ErrExchange             = fmt.Errorf("exchange failed")
-	ErrNoIDToken            = fmt.Errorf("no id_token")
-	ErrParseEncrypted       = fmt.Errorf("jose.ParseEncrypted failed")
-	ErrJWEDecrypt           = fmt.Errorf("jwe.Decrypt failed")
-	ErrVerify               = fmt.Errorf("verify failed")
-	ErrExtractNRIC          = fmt.Errorf("cannot extract nric and uuid")
-	ErrInvalidSubPayload    = fmt.Errorf("token payload sub property is invalid, does not contain valid NRIC and uuid string")
+	ErrNoEncKeyFound        = errors.New("no enc key found")
+	ErrNoSigKeyFound        = errors.New("no sig key found")
+	ErrUnsupportedAlgorithm = errors.New("invalid alg")
+	ErrStateInvalid         = errors.New("state invalid")
+	ErrStateMismatch        = errors.New("state mismatch")
+	ErrNonceMismatch        = errors.New("nonce mismatch")
+	ErrMissingCode          = errors.New("missing code")
+	ErrCreateClaims         = errors.New("jwt.NewWithClaims")
+	ErrExchange             = errors.New("exchange failed")
+	ErrNoIDToken            = errors.New("no id_token")
+	ErrParseEncrypted       = errors.New("jose.ParseEncrypted failed")
+	ErrJWEDecrypt           = errors.New("jwe.Decrypt failed")
+	ErrVerify               = errors.New("verify failed")
+	ErrExtractNRIC          = errors.New("cannot extract nric and uuid")
+	ErrInvalidSubPayload    = errors.New("token payload sub property is invalid, does not contain valid NRIC and uuid string")
 )
 
 // NonceState is a pair of nonce and state; things we keep track of before sending the user to singpass.
 type NonceState struct {
-	Nonce string
-	State string
+	Nonce string `json:"n"`
+	State string `json:"s"`
 }
 
 const nonceStateCookieName = "singpass_nonce_state"
 
 // NonceStateToCookie sets a cookie with the given NonceState.
 func NonceStateToCookie(w http.ResponseWriter) (NonceState, error) {
-	var ret NonceState
 	bigint, err := rand.Int(rand.Reader, big.NewInt(1<<62))
 	if err != nil {
-		return ret, err
+		return NonceState{}, fmt.Errorf("rand.Int: %w", err)
 	}
-
-	state := bigint.Text(62)
+	ns := NonceState{
+		State: bigint.Text(62),
+		Nonce: strconv.FormatInt(time.Now().UnixMilli(), 10),
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     nonceStateCookieName,
-		Value:    state,
+		Value:    strings.Join([]string{ns.State, ns.Nonce}, "."),
 		Path:     "/",
 		Expires:  time.Now().Add(time.Hour),
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode, // redirecting back from oauth provider
 	})
-	return NonceState{Nonce: strconv.FormatInt(time.Now().UnixMilli(), 10), State: state}, nil
+	return ns, nil
 }
 
-// StateFromCookie returns the state from the given request's cookie, previously set by NonceStateToCookie.
-func StateFromCookie(r *http.Request) string {
+// NonceStateFromCookie returns the state from the given request's cookie, previously set by NonceStateToCookie.
+func NonceStateFromCookie(r *http.Request) (NonceState, error) {
 	cookie, err := r.Cookie(nonceStateCookieName)
 	if err != nil {
-		return ""
+		return NonceState{}, fmt.Errorf("r.Cookie: %w", err)
 	}
-	return cookie.Value
+	parts := strings.Split(cookie.Value, ".")
+	if len(parts) != 2 {
+		return NonceState{}, fmt.Errorf("expected 2 parts but got %#v: %w", parts, ErrStateInvalid)
+	}
+	return NonceState{State: parts[0], Nonce: parts[1]}, nil
 }
 
 type httpErrorHandler func(w http.ResponseWriter, r *http.Request, err error)
@@ -103,7 +111,7 @@ func CallbackFromSingpass(
 	provider *oidc.Provider,
 	secretKeySet jose.JSONWebKeySet,
 	oauth2Config oauth2.Config,
-	getState func(r *http.Request) string,
+	getNonceState func(r *http.Request) (NonceState, error),
 	errHandler httpErrorHandler,
 	okHandler func(w http.ResponseWriter, r *http.Request, payload NRICAndUUID),
 ) (http.HandlerFunc, error) {
@@ -126,15 +134,20 @@ func CallbackFromSingpass(
 		signingMethod = jwt.SigningMethodES512
 	default:
 		// https://stg-id.singpass.gov.sg/docs/authorization/api#_jwt_header
-		return nil, errors.Join(ErrUnsupportedAlgorithm, errors.New(sigJwk.Algorithm))
+		return nil, fmt.Errorf("alg %#v: %w", sigJwk.Algorithm, ErrUnsupportedAlgorithm)
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 
-		state := getState(r)
-		if state != r.URL.Query().Get("state") {
-			errHandler(w, r, ErrStateMismatch)
+		ns, err := getNonceState(r)
+		if err != nil {
+			errHandler(w, r, errors.Join(ErrStateInvalid, err))
+			return
+		}
+
+		if s := r.URL.Query().Get("state"); s != ns.State {
+			errHandler(w, r, fmt.Errorf("expected %#v but got %#v: %w", ns.State, s, ErrStateMismatch))
 			return
 		}
 
@@ -197,6 +210,17 @@ func CallbackFromSingpass(
 			errHandler(w, r, errors.Join(ErrVerify, err))
 			return
 		}
+		var claims jwt.MapClaims
+		if err := idToken.Claims(&claims); err != nil {
+			errHandler(w, r, errors.Join(ErrVerify, err))
+			return
+		}
+
+		if s := claims["nonce"]; s != ns.Nonce {
+			errHandler(w, r, fmt.Errorf("expected %#v but got %#v: %w", ns.Nonce, s, ErrNonceMismatch))
+			return
+		}
+
 		payload, err := ExtractNRICAndUUIDFromPayload(idToken.Subject)
 		if err != nil {
 			errHandler(w, r, errors.Join(ErrExtractNRIC, err))
