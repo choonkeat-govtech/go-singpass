@@ -160,6 +160,7 @@ func CallbackFromSingpass(
 
 		// https://stg-id.singpass.gov.sg/docs/authorization/api#_authorization_code_grant_authenticated_with_client_assertion_jwt
 		oauth2Token, err := oauth2Config.Exchange(ctx, code,
+			oauth2.SetAuthURLParam("client_id", oauth2Config.ClientID),
 			oauth2.SetAuthURLParam("client_assertion", jwtString),
 			oauth2.SetAuthURLParam("client_assertion_type", "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"),
 		)
