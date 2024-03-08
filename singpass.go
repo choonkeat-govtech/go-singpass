@@ -203,8 +203,20 @@ func CallbackFromSingpass(
 
 		// Parse and verify ID Token payload.
 		idToken, err := provider.Verifier(&oidc.Config{
-			SupportedSigningAlgs: []string{sigJwk.Algorithm},
-			ClientID:             oauth2Config.ClientID,
+			ClientID: oauth2Config.ClientID,
+			SupportedSigningAlgs: []string{
+				// oidc.supportedAlgorithms but not exposed 🤷‍♂️
+				oidc.RS256,
+				oidc.RS384,
+				oidc.RS512,
+				oidc.ES256,
+				oidc.ES384,
+				oidc.ES512,
+				oidc.PS256,
+				oidc.PS384,
+				oidc.PS512,
+				oidc.EdDSA,
+			},
 		}).Verify(ctx, string(decryptedIDToken))
 		if err != nil {
 			errHandler(w, r, errors.Join(ErrVerify, err))
