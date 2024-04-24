@@ -44,7 +44,7 @@ type NonceState struct {
 const nonceStateCookieName = "singpass_nonce_state"
 
 // NonceStateToCookie sets a cookie with the given NonceState.
-func NonceStateToCookie(w http.ResponseWriter) (NonceState, error) {
+func NonceStateToCookie(w http.ResponseWriter, r *http.Request) (NonceState, error) {
 	bigint, err := rand.Int(rand.Reader, big.NewInt(1<<62))
 	if err != nil {
 		return NonceState{}, fmt.Errorf("rand.Int: %w", err)
@@ -82,11 +82,11 @@ type httpErrorHandler func(w http.ResponseWriter, r *http.Request, err error)
 // RedirectToSingpass returns a http.HandlerFunc that redirects the user to singpass.
 func RedirectToSingpass(
 	oauth2Config oauth2.Config,
-	generateNonceState func(w http.ResponseWriter) (NonceState, error),
+	generateNonceState func(w http.ResponseWriter, r *http.Request) (NonceState, error),
 	errHandler httpErrorHandler,
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		generated, err := generateNonceState(w)
+		generated, err := generateNonceState(w, r)
 		if err != nil {
 			errHandler(w, r, err)
 			return
